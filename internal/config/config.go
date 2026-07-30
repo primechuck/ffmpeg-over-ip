@@ -14,7 +14,7 @@ import (
 	"github.com/tidwall/jsonc"
 )
 
-const DefaultDialTimeout = 2 * time.Second
+const DefaultDialTimeout = 2 * time.Second // default per-attempt dial timeout, small for fast failover
 
 type LogValue string
 
@@ -40,9 +40,12 @@ type ServerConfig struct {
 }
 
 type ClientConfig struct {
-	Log              LogValue    `json:"log"`
-	Address          string      `json:"address"`
-	AuthSecret       string      `json:"authSecret"`
+	Log LogValue `json:"log"`
+	Address string `json:"address"`
+	AuthSecret string `json:"authSecret"`
+	// DialTimeout is per-attempt connect timeout. Go duration string with units:
+	// "500ms" or "0.5s" = half second, "2s" = 2 seconds (default), "1m" = 1 minute.
+	// Use small for fast failover across many little nodes.
 	DialTimeout      string      `json:"dialTimeout"`
 	FallbackToLocal  bool        `json:"fallbackToLocal"`
 	FallbackRewrites [][2]string `json:"fallbackRewrites"`
