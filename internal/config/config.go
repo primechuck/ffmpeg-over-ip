@@ -33,16 +33,86 @@ func (l *LogValue) UnmarshalJSON(data []byte) error {
 }
 
 type ServerConfig struct {
-	Log           LogValue    `json:"log"`
-	Address       string      `json:"address"`
-	AuthSecret    string      `json:"authSecret"`
-	Rewrites      [][2]string `json:"rewrites"`
-	MaxConcurrent int         `json:"maxConcurrent"`
-	Debug         bool        `json:"debug"`
+	Log                   LogValue    `json:"log"`
+	Address               string      `json:"address"`
+	AuthSecret            string      `json:"authSecret"`
+	Rewrites              [][2]string `json:"rewrites"`
+	ShortCircuitRead      []string    `json:"shortCircuitRead"`
+	ShortCircuitReadWrite []string    `json:"shortCircuitReadWrite"`
+	ShortCircuitShared    []string    `json:"shortCircuitShared"`
+	MaxConcurrent         int         `json:"maxConcurrent"`
+	AllowedPeers          []string    `json:"allowedPeers"` // CIDR or IP, for WireGuard mesh
+	Debug                 bool        `json:"debug"`
+}
+
+func (c *ServerConfig) ResolveShortCircuitPaths() (ro []string, rw []string, err error) {
+	ro, err = cleanAndValidatePrefixes("shortCircuitRead", c.ShortCircuitRead)
+	if err != nil {
+		return nil, nil, err
+	}
+	rwList := append([]string{}, c.ShortCircuitReadWrite...)
+	rwList = append(rwList, c.ShortCircuitShared...)
+	rw, err = cleanAndValidatePrefixes("shortCircuitReadWrite", rwList)
+	if err != nil {
+		return nil, nil, err
+	}
+	return ro, rw, nil
+}
+
+func cleanAndValidatePrefixes(name string, prefixes []string) ([]string, error) {
+	if len(prefixes) == 0 {
+		return nil, nil
+	}
+	out := make([]string, 0, len(prefixes))
+	seen := make(map[string]struct{}, len(prefixes))
+	for _, p := range prefixes {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		for len(p) > 1 && p[len(p)-1] == '/' {
+			p = p[:len(p)-1]
+		}
+		if !filepath.IsAbs(p) {
+			return nil, fmt.Errorf("config: %s entry %q is not an absolute path", name, p)
+		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		info, err := os.Stat(p)
+		if err != nil {
+			return nil, fmt.Errorf("config: %s entry %q is unusable: %w", name, p, err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("config: %s entry %q is not a directory", name, p)
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+func SplitPathList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	normalized := strings.ReplaceAll(s, ",", string(filepath.ListSeparator))
+	if filepath.ListSeparator == ':' {
+		normalized = strings.ReplaceAll(normalized, ";", ":")
+	} else {
+		normalized = strings.ReplaceAll(normalized, ":", ";")
+	}
+	out := make([]string, 0, 4)
+	for _, p := range filepath.SplitList(normalized) {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 type ClientConfig struct {
-	Log              LogValue    `json:"log"`
+	Log LogValue `json:"log"`
 	Address          string      `json:"address"`
 	AuthSecret       string      `json:"authSecret"`
 	DialTimeout      string      `json:"dialTimeout"`
@@ -52,10 +122,15 @@ type ClientConfig struct {
 }
 
 func (c *ClientConfig) Addresses() []string {
-	out := []string{}
-	for _, p := range strings.Split(c.Address, ",") {
-		if s := strings.TrimSpace(p); s != "" {
-			out = append(out, s)
+	return SplitAddresses(c.Address)
+}
+
+func SplitAddresses(address string) []string {
+	parts := strings.Split(address, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
 		}
 	}
 	return out
@@ -131,6 +206,11 @@ func serverConfigFromEnv() *ServerConfig {
 	if address == "" || authSecret == "" {
 		return nil
 	}
+	reads := SplitPathList(os.Getenv("FFMPEG_OVER_IP_SERVER_SHORT_CIRCUIT_READ"))
+	rw := SplitPathList(os.Getenv("FFMPEG_OVER_IP_SERVER_SHORT_CIRCUIT_READ_WRITE"))
+	if len(rw) == 0 {
+		rw = SplitPathList(os.Getenv("FFMPEG_OVER_IP_SERVER_SHORT_CIRCUIT_SHARED"))
+	}
 	maxConc := 1
 	if s, ok := os.LookupEnv("FFMPEG_OVER_IP_SERVER_MAX_CONCURRENT"); ok {
 		if strings.TrimSpace(s) == "" {
@@ -139,12 +219,19 @@ func serverConfigFromEnv() *ServerConfig {
 			maxConc = v
 		}
 	}
+	peers := SplitPathList(os.Getenv("FFMPEG_OVER_IP_SERVER_ALLOWED_PEERS"))
+	if len(peers) == 0 {
+		peers = SplitPathList(os.Getenv("FFMPEG_OVER_IP_SERVER_ALLOWED_IPS"))
+	}
 	return &ServerConfig{
-		Address:       address,
-		AuthSecret:    authSecret,
-		MaxConcurrent: maxConc,
-		Log:           LogValue(os.Getenv("FFMPEG_OVER_IP_SERVER_LOG")),
-		Debug:         parseLaxBool(os.Getenv("FFMPEG_OVER_IP_SERVER_DEBUG")),
+		Address:               address,
+		AuthSecret:            authSecret,
+		Log:                   LogValue(os.Getenv("FFMPEG_OVER_IP_SERVER_LOG")),
+		ShortCircuitRead:      reads,
+		ShortCircuitReadWrite: rw,
+		MaxConcurrent:         maxConc,
+		AllowedPeers:          peers,
+		Debug:                 parseLaxBool(os.Getenv("FFMPEG_OVER_IP_SERVER_DEBUG")),
 	}
 }
 

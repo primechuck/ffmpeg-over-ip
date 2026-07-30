@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -22,6 +23,40 @@ import (
 )
 
 var activeConns atomic.Int32
+
+func isPeerAllowed(remoteAddr net.Addr, allowed []string) bool {
+	if len(allowed) == 0 {
+		return true // no restriction
+	}
+	host, _, err := net.SplitHostPort(remoteAddr.String())
+	if err != nil {
+		host = remoteAddr.String()
+	}
+	remoteIP := net.ParseIP(host)
+	if remoteIP == nil {
+		return false
+	}
+	for _, cidr := range allowed {
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			continue
+		}
+		// Try CIDR
+		if _, ipNet, err := net.ParseCIDR(cidr); err == nil {
+			if ipNet.Contains(remoteIP) {
+				return true
+			}
+			continue
+		}
+		// Try exact IP
+		if ip := net.ParseIP(cidr); ip != nil {
+			if ip.Equal(remoteIP) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 func main() {
 	configPath := flag.String("config", "", "path to server config file")
@@ -55,11 +90,28 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	ro, rw, err := cfg.ResolveShortCircuitPaths()
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	if len(ro) > 0 {
+		log.Printf("short-circuit RO for: %v", ro)
+	}
+	if len(rw) > 0 {
+		log.Printf("short-circuit RW for: %v", rw)
+	}
 	if cfg.MaxConcurrent == 0 {
 		log.Printf("max concurrent: unlimited")
 	} else {
 		log.Printf("max concurrent: %d (default 1 for little nodes, bump for big GPU)", cfg.MaxConcurrent)
 	}
+	if len(cfg.AllowedPeers) > 0 {
+		log.Printf("allowed peers: %v (WireGuard mesh)", cfg.AllowedPeers)
+	}
+
+	// Re-assign for closure capture (cfg has raw, but we want resolved)
+	cfg.ShortCircuitRead = ro
+	cfg.ShortCircuitReadWrite = rw
 
 	network, addr := config.ParseAddress(cfg.Address)
 	listener, err := net.Listen(network, addr)
@@ -101,6 +153,13 @@ func main() {
 
 func handleConnection(ctx context.Context, conn net.Conn, cfg *config.ServerConfig, ffmpegPath, ffprobePath string) {
 	defer conn.Close()
+
+	// WireGuard mesh: only allow peers in allowed list (CIDR or IP)
+	if !isPeerAllowed(conn.RemoteAddr(), cfg.AllowedPeers) {
+		sendError(conn, "peer not allowed")
+		log.Printf("reject not allowed peer %s (allowed: %v)", conn.RemoteAddr(), cfg.AllowedPeers)
+		return
+	}
 
 	// Admission control: if at capacity, reject immediately so client can failover fast
 	if cfg.MaxConcurrent > 0 && int(activeConns.Load()) >= cfg.MaxConcurrent {
@@ -163,6 +222,7 @@ func handleConnection(ctx context.Context, conn net.Conn, cfg *config.ServerConf
 
 	// Start process
 	proc := process.NewProcess(binaryPath, args)
+	proc.SetShortCircuitPaths(cfg.ShortCircuitRead, cfg.ShortCircuitReadWrite)
 	if err := proc.Start(ctx); err != nil {
 		sendError(conn, fmt.Sprintf("failed to start process: %v", err))
 		return
