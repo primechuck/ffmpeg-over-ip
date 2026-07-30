@@ -55,9 +55,11 @@ func main() {
 
 	defer config.SetupLogging(cfg.Log)()
 
-	// Small feature: multiple hosts, sequential failover, no server changes needed
+	// Small feature: multiple hosts, sequential failover with fair shuffle
+	// Timeout comes from config: env FFMPEG_OVER_IP_CLIENT_DIAL_TIMEOUT or jsonc dialTimeout, not hardcoded
 	addrs := cfg.Addresses()
-	conn, addr, err := dialWithFailover(context.Background(), addrs)
+	timeout := cfg.DialTimeoutDuration()
+	conn, addr, err := dialWithFailoverTimeout(context.Background(), addrs, timeout)
 	if err != nil {
 		if cfg.FallbackToLocal {
 			deps, derr := realFallbackDeps()

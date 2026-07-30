@@ -9,9 +9,12 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/tidwall/jsonc"
 )
+
+const DefaultDialTimeout = 5 * time.Second
 
 type LogValue string
 
@@ -40,6 +43,7 @@ type ClientConfig struct {
 	Log              LogValue    `json:"log"`
 	Address          string      `json:"address"`
 	AuthSecret       string      `json:"authSecret"`
+	DialTimeout      string      `json:"dialTimeout"`
 	FallbackToLocal  bool        `json:"fallbackToLocal"`
 	FallbackRewrites [][2]string `json:"fallbackRewrites"`
 	Debug            bool        `json:"debug"`
@@ -53,6 +57,18 @@ func (c *ClientConfig) Addresses() []string {
 		}
 	}
 	return out
+}
+
+func (c *ClientConfig) DialTimeoutDuration() time.Duration {
+	if c.DialTimeout == "" {
+		return DefaultDialTimeout
+	}
+	d, err := time.ParseDuration(c.DialTimeout)
+	if err != nil || d < 0 {
+		log.Printf("invalid dialTimeout %q, using %s", c.DialTimeout, DefaultDialTimeout)
+		return DefaultDialTimeout
+	}
+	return d
 }
 
 func LoadServerConfig(explicitPath string) (*ServerConfig, error) {
@@ -128,6 +144,7 @@ func clientConfigFromEnv() *ClientConfig {
 		Address:         address,
 		AuthSecret:      authSecret,
 		Log:             LogValue(os.Getenv("FFMPEG_OVER_IP_CLIENT_LOG")),
+		DialTimeout:     os.Getenv("FFMPEG_OVER_IP_CLIENT_DIAL_TIMEOUT"),
 		FallbackToLocal: parseLaxBool(os.Getenv("FFMPEG_OVER_IP_CLIENT_FALLBACK_TO_LOCAL")),
 		Debug:           parseLaxBool(os.Getenv("FFMPEG_OVER_IP_CLIENT_DEBUG")),
 	}
