@@ -161,14 +161,20 @@ func handleConnection(ctx context.Context, conn net.Conn, cfg *config.ServerConf
 		return
 	}
 
-	// Admission control: if at capacity, reject immediately so client can failover fast
-	if cfg.MaxConcurrent > 0 && int(activeConns.Load()) >= cfg.MaxConcurrent {
-		sendError(conn, "server busy: at capacity")
-		log.Printf("reject busy from %s (%d/%d active)", conn.RemoteAddr(), activeConns.Load(), cfg.MaxConcurrent)
-		return
+	// Admission control: atomic increment then check to avoid race where 2 conns both see 0 < max
+	if cfg.MaxConcurrent > 0 {
+		cur := activeConns.Add(1)
+		if int(cur) > cfg.MaxConcurrent {
+			activeConns.Add(-1)
+			sendError(conn, "server busy: at capacity")
+			log.Printf("reject busy from %s (%d/%d active)", conn.RemoteAddr(), cur-1, cfg.MaxConcurrent)
+			return
+		}
+		defer activeConns.Add(-1)
+	} else {
+		activeConns.Add(1)
+		defer activeConns.Add(-1)
 	}
-	activeConns.Add(1)
-	defer activeConns.Add(-1)
 
 	// Prevent slowloris holding slot: 10s to send first message
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
