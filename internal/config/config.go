@@ -14,7 +14,7 @@ import (
 	"github.com/tidwall/jsonc"
 )
 
-const DefaultDialTimeout = 5 * time.Second
+const DefaultDialTimeout = 2 * time.Second
 
 type LogValue string
 
