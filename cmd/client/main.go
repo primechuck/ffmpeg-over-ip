@@ -97,12 +97,24 @@ func main() {
 			remaining = removeAddr(remaining, addr)
 			continue
 		}
-		if msg.Type == protocol.MsgError && strings.Contains(strings.ToLower(string(msg.Payload)), "busy") {
-			log.Printf("server %s busy, trying next (%d remaining)", addr, len(remaining)-1)
-			conn.Close()
-			lastErr = fmt.Errorf("busy: %s", string(msg.Payload))
-			remaining = removeAddr(remaining, addr)
-			continue
+		if msg.Type == protocol.MsgError {
+			payloadLower := strings.ToLower(string(msg.Payload))
+			if strings.Contains(payloadLower, "busy") || strings.Contains(payloadLower, "capacity") {
+				log.Printf("server %s busy, trying next (%d remaining)", addr, len(remaining)-1)
+				conn.Close()
+				lastErr = fmt.Errorf("busy: %s", string(msg.Payload))
+				remaining = removeAddr(remaining, addr)
+				continue
+			}
+			// Retryable: failed to start process (ffmpeg missing, fork fail, transient)
+			if strings.Contains(payloadLower, "failed to start process") {
+				log.Printf("server %s failed to start process, trying next (%d remaining): %s", addr, len(remaining)-1, string(msg.Payload))
+				conn.Close()
+				lastErr = fmt.Errorf("start failed on %s: %s", addr, string(msg.Payload))
+				remaining = removeAddr(remaining, addr)
+				continue
+			}
+			// Non-retryable: auth failed, invalid command, unknown program
 		}
 
 		// Not busy - run full session with this conn and first msg
